@@ -49,7 +49,7 @@ if __name__ == "__main__":
             main_GameObject = [
                 o.read()
                 for o in env.objects
-                if o.type.name == "GameObject" and o.read().name == id
+                if o.type.name == "GameObject" and o.read().name == id  # type: ignore
             ][0]
 
             pp.pprint(main_GameObject)
