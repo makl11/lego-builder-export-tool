@@ -1,15 +1,16 @@
+from typing import Any
 import xml.etree.ElementTree as ET
 from json import load as parseJson
 from pprint import PrettyPrinter
 from urllib.request import urlopen
 
-from UnityPy import load as loadUnityFile
+from UnityPy import load as loadUnityFile # type: ignore because I'd have to create my own Stub
 
 pp = PrettyPrinter(indent=4)
 BASE_URL = "https://dbix.services.lego.com/api/v1"
 
 
-def get_model_info(model_id, locale="en-US"):
+def get_model_info(model_id: str | int, locale: str = "en-US"):
     url = f"https://buildinginstructions.services.lego.com/Products/{model_id}?culture={locale}&market={locale.split('-')[1]}"
     build_instructions = parseJson(
         urlopen(f"{BASE_URL}/buildinginstructions?ProductNumber={model_id}")
@@ -19,14 +20,16 @@ def get_model_info(model_id, locale="en-US"):
     return model_info
 
 
-def load_build_instructions_xml(build_instructions):
+def load_build_instructions_xml(build_instructions: Any):
     return ET.parse(urlopen(build_instructions["Url"]))
 
 
-def make_find_and_load_brick(build_instructions_xml):
-    def find_and_load_brick(refId):
+def make_find_and_load_brick(build_instructions_xml: ET.ElementTree):
+    def find_and_load_brick(refId: str | int):
         brick = build_instructions_xml.find(f".//Brick[@refID='{refId}']")
-        id, revision = brick.get("designID").split(";")
+        if not brick:
+            raise RuntimeError(f"Brick with refId {refId} not found")
+        id, revision = brick.attrib["designID"].split(";")
         asset_url = f"{BASE_URL}/bricks/{id}?Revision={revision}&Platform=android"
         return id, revision, urlopen(asset_url)
 
@@ -42,7 +45,7 @@ if __name__ == "__main__":
 
     for step in steps:
         for brick in step.findall(".//In[@brickRef]"):
-            id, revision, file = find_and_load_brick(brick.get("brickRef"))
+            id, revision, file = find_and_load_brick(brick.attrib["brickRef"])
 
             env = loadUnityFile(file.read())
 
