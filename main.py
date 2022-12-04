@@ -1,10 +1,11 @@
-from typing import Any
 import xml.etree.ElementTree as ET
 from json import load as parseJson
 from pprint import PrettyPrinter
 from urllib.request import urlopen
 
-from UnityPy import load as loadUnityFile # type: ignore because I'd have to create my own Stub
+from UnityPy import load as loadUnityFile  # type: ignore because I'd have to create my own Stub
+
+from typings import BuildingInstruction, ModelInfo
 
 pp = PrettyPrinter(indent=4)
 BASE_URL = "https://dbix.services.lego.com/api/v1"
@@ -14,14 +15,20 @@ def get_model_info(model_id: str | int, locale: str = "en-US"):
     url = f"https://buildinginstructions.services.lego.com/Products/{model_id}?culture={locale}&market={locale.split('-')[1]}"
     build_instructions = parseJson(
         urlopen(f"{BASE_URL}/buildinginstructions?ProductNumber={model_id}")
-    )["BuildingInstructions"]
-    model_info = parseJson(urlopen(url))
-    model_info["BuildingInstructions"] = build_instructions
+    ).pop("BuildingInstructions")
+    model_info: ModelInfo = parseJson(
+        urlopen(url),
+        object_hook=lambda o: ModelInfo.from_dict(
+            {**o, "BuildingInstructions": build_instructions}
+        )
+        if "ThemeId" in o
+        else o,
+    )
     return model_info
 
 
-def load_build_instructions_xml(build_instructions: Any):
-    return ET.parse(urlopen(build_instructions["Url"]))
+def load_build_instructions_xml(build_instruction: BuildingInstruction):
+    return ET.parse(urlopen(build_instruction.Url))
 
 
 def make_find_and_load_brick(build_instructions_xml: ET.ElementTree):
@@ -38,7 +45,7 @@ def make_find_and_load_brick(build_instructions_xml: ET.ElementTree):
 
 if __name__ == "__main__":
     model_info = get_model_info(75335, "de-de")
-    instructions = load_build_instructions_xml(model_info["BuildingInstructions"][0])
+    instructions = load_build_instructions_xml(model_info.BuildingInstructions[0])
     steps = instructions.findall(".//Step")
 
     find_and_load_brick = make_find_and_load_brick(instructions)
