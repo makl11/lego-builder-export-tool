@@ -1,3 +1,4 @@
+from typing import Any
 import xml.etree.ElementTree as ET
 from json import load as parseJson
 from pprint import PrettyPrinter
@@ -7,8 +8,17 @@ from UnityPy import load as loadUnityFile  # type: ignore because I'd have to cr
 
 from typings import BuildingInstruction, ModelInfo
 
+from lego_colors import Lego_Colors
+
 pp = PrettyPrinter(indent=4)
 BASE_URL = "https://dbix.services.lego.com/api/v1"
+
+
+def hex_to_rgb0to1(hex: str):
+    r = int(hex[0:2], 16) / 255
+    g = int(hex[2:4], 16) / 255
+    b = int(hex[4:6], 16) / 255
+    return r, g, b
 
 
 def get_model_info(model_id: str | int, locale: str = "en-US"):
@@ -33,12 +43,14 @@ def load_build_instructions_xml(build_instruction: BuildingInstruction):
 
 def make_find_and_load_brick(build_instructions_xml: ET.ElementTree):
     def find_and_load_brick(refId: str | int):
-        brick = build_instructions_xml.find(f".//Brick[@refID='{refId}']")
+        brick = build_instructions_xml.find(f".//Brick[@refID='{refId}']/Part")
         if not brick:
             raise RuntimeError(f"Brick with refId {refId} not found")
         id, revision = brick.attrib["designID"].split(";")
+        color_id, _ = brick.attrib["materials"].split(":")  # idk what _ is yet
+
         asset_url = f"{BASE_URL}/bricks/{id}?Revision={revision}&Platform=android"
-        return id, revision, urlopen(asset_url)
+        return id, revision, color_id, urlopen(asset_url)
 
     return find_and_load_brick
 
@@ -52,17 +64,25 @@ if __name__ == "__main__":
 
     for step in steps:
         for brick in step.findall(".//In[@brickRef]"):
-            id, revision, file = find_and_load_brick(brick.attrib["brickRef"])
+            id, revision, color_id, file = find_and_load_brick(brick.attrib["brickRef"])
 
             env = loadUnityFile(file.read())
 
-            main_GameObject = [
-                o.read()
-                for o in env.objects
-                if o.type.name == "GameObject" and o.read().name == id  # type: ignore
-            ][0]
+            game_objects = [
+                o.read() for o in env.objects if o.type.name == "GameObject"
+            ]
 
-            pp.pprint(main_GameObject)
+            main = [go for go in game_objects if go.name == id][0]  # type: ignore
+
+            shell = [go for go in game_objects if go.name == "Shell"][0]  # type: ignore
+
+            knobs = [go for go in game_objects if go.name.startswith("knob")]  # type: ignore
+
+            tubes = [go for go in game_objects if go.name.startswith("tube")]  # type: ignore
+
+            color = Lego_Colors[color_id]
+
+            pp.pprint(main)
 
             ### break after first iteration until code for processing a step and its bricks is done
             break
