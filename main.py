@@ -1,4 +1,3 @@
-from typing import Any
 import xml.etree.ElementTree as ET
 from json import load as parseJson
 from pprint import PrettyPrinter
@@ -6,9 +5,7 @@ from urllib.request import urlopen
 
 from UnityPy import load as loadUnityFile  # type: ignore because I'd have to create my own Stub
 
-from typings import BuildingInstruction, ModelInfo
-
-from lego_colors import Lego_Colors
+from typings import Brick, BuildingInstruction, ModelInfo
 
 pp = PrettyPrinter(indent=4)
 BASE_URL = "https://dbix.services.lego.com/api/v1"
@@ -42,15 +39,14 @@ def load_build_instructions_xml(build_instruction: BuildingInstruction):
 
 
 def make_find_and_load_brick(build_instructions_xml: ET.ElementTree):
-    def find_and_load_brick(refId: str | int):
+    def find_and_load_brick(refId: str | int) -> Brick:
         brick = build_instructions_xml.find(f".//Brick[@refID='{refId}']/Part")
         if not brick:
             raise RuntimeError(f"Brick with refId {refId} not found")
         id, revision = brick.attrib["designID"].split(";")
         color_id, _ = brick.attrib["materials"].split(":")  # idk what _ is yet
 
-        asset_url = f"{BASE_URL}/bricks/{id}?Revision={revision}&Platform=android"
-        return id, revision, color_id, urlopen(asset_url)
+        return Brick(id, revision, color_id)
 
     return find_and_load_brick
 
@@ -64,23 +60,21 @@ if __name__ == "__main__":
 
     for step in steps:
         for brick in step.findall(".//In[@brickRef]"):
-            id, revision, color_id, file = find_and_load_brick(brick.attrib["brickRef"])
+            brick = find_and_load_brick(brick.attrib["brickRef"])
 
-            env = loadUnityFile(file.read())
+            env = loadUnityFile(brick.asset_file.read())
 
             game_objects = [
                 o.read() for o in env.objects if o.type.name == "GameObject"
             ]
 
-            main = [go for go in game_objects if go.name == id][0]  # type: ignore
+            main = [go for go in game_objects if go.name == brick.id][0]  # type: ignore
 
             shell = [go for go in game_objects if go.name == "Shell"][0]  # type: ignore
 
             knobs = [go for go in game_objects if go.name.startswith("knob")]  # type: ignore
 
             tubes = [go for go in game_objects if go.name.startswith("tube")]  # type: ignore
-
-            color = Lego_Colors[color_id]
 
             pp.pprint(main)
 

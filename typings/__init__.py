@@ -1,3 +1,4 @@
+from .Brick import *
 from dataclasses import dataclass
 from typing import Any, List
 
