@@ -1,6 +1,21 @@
-from .Brick import *
 from dataclasses import dataclass
 from typing import Any, List
+
+from UnityPy.classes import GameObject
+
+from .Brick import *
+
+
+class GOWithChildren:
+    child_objects: List[GameObject]
+
+    def __init__(self, gameobject: GameObject, child_objects: List[GameObject] = []):
+        self._gameobject = gameobject
+        self._child_objects = child_objects
+
+    @property
+    def field(self):  # type: ignore
+        return self._gameobject.field  # type: ignore
 
 
 @dataclass
