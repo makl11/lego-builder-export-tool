@@ -3,7 +3,7 @@ from json import load as parseJson
 from pprint import PrettyPrinter
 from urllib.request import urlopen
 
-from UnityPy import load as loadUnityFile  # type: ignore because I'd have to create my own Stub
+from UnityPy import load as loadUnityFile
 
 from typings import Brick, BuildingInstruction, ModelInfo
 
