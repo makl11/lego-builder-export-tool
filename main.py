@@ -51,6 +51,19 @@ def make_find_and_load_brick(build_instructions_xml: ET.ElementTree):
     return find_and_load_brick
 
 
+def resolve_game_object_structure(main_gameobject: Any):
+    """This function modifies the gameobject directly. No need to use the return value of this function, but you could."""
+    transform = main_gameobject.m_Transform.get_obj().read()
+    if len(transform.m_Children) == 0:
+        return main_gameobject
+    children = [
+        resolve_game_object_structure(c.get_obj().read().m_GameObject.get_obj().read())
+        for c in transform.m_Children
+    ]
+    main_gameobject.child_objects = children
+    return main_gameobject
+
+
 if __name__ == "__main__":
     model_info = get_model_info(75335, "de-de")
     instructions = load_build_instructions_xml(model_info.BuildingInstructions[0])
@@ -70,11 +83,7 @@ if __name__ == "__main__":
 
             main = [go for go in game_objects if go.name == brick.id][0]  # type: ignore
 
-            shell = [go for go in game_objects if go.name == "Shell"][0]  # type: ignore
-
-            knobs = [go for go in game_objects if go.name.startswith("knob")]  # type: ignore
-
-            tubes = [go for go in game_objects if go.name.startswith("tube")]  # type: ignore
+            resolve_game_object_structure(main)
 
             pp.pprint(main)
 
