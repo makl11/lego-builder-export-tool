@@ -1,16 +1,24 @@
+import math
 import os
-from dataclasses import astuple, dataclass
+import sys
+from dataclasses import dataclass
 from enum import IntEnum, auto
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
+from pygltflib import ARRAY_BUFFER
+from pygltflib import BYTE as ComponentTypeByte
+from pygltflib import CLAMP_TO_EDGE, ELEMENT_ARRAY_BUFFER
 from pygltflib import FLOAT as ComponentTypeFloat
-from pygltflib import GLTF2
+from pygltflib import GLTF2, MIRRORED_REPEAT, REPEAT
 from pygltflib import SCALAR as AccessorTypeScalar
-from pygltflib import UNSIGNED_INT as ComponentTypeUInt
+from pygltflib import SHORT as ComponentTypeShort
+from pygltflib import UNSIGNED_BYTE as ComponentTypeUnsignedByte
+from pygltflib import UNSIGNED_INT as ComponentTypeUnsignedInt
+from pygltflib import UNSIGNED_SHORT as ComponentTypeUnsignedShort
 from pygltflib import VEC2 as AccessorTypeVec2
 from pygltflib import VEC3 as AccessorTypeVec3
 from pygltflib import VEC4 as AccessorTypeVec4
-from pygltflib import Accessor, Asset, Attributes, Buffer
+from pygltflib import Accessor, Asset, Attributes, Buffer, BufferView
 from pygltflib import Mesh as GLTFMesh
 from pygltflib import Node
 from pygltflib import NormalMaterialTexture as NormalTextureInfo
@@ -18,11 +26,11 @@ from pygltflib import (
     OcclusionTextureInfo,
     PbrMetallicRoughness,
     Primitive,
+    Sampler,
     Scene,
     TextureInfo,
 )
 
-from typings import GOWithChildren
 from UnityPy.classes import (
     GameObject,
     Material,
@@ -37,8 +45,20 @@ from UnityPy.classes.Mesh import SubMesh
 from UnityPy.classes.Object import NodeHelper
 from UnityPy.enums import GfxPrimitiveType
 from UnityPy.math import Color, Vector2, Vector3, Vector4
+from UnityPy.streams import EndianBinaryWriter
 
 from .util import get_transform
+
+
+class BUFFERVIEW_TARGETS(IntEnum):
+    ARRAY_BUFFER = ARRAY_BUFFER
+    ELEMENT_ARRAY_BUFFER = ELEMENT_ARRAY_BUFFER
+
+
+class WRAPPING_MODES(IntEnum):
+    CLAMP_TO_EDGE = CLAMP_TO_EDGE
+    MIRRORED_REPEAT = MIRRORED_REPEAT
+    REPEAT = REPEAT
 
 
 class TextureMapType(IntEnum):
@@ -61,6 +81,7 @@ class UnityGLTFExporter:
     _root: GLTF2
     _bufferId: int
     _buffer: Buffer
+    _bufferWriter: EndianBinaryWriter
     _imageInfos: List[ImageInfo]
     _textures: List[Texture]
     _materials: List[Material]
@@ -76,8 +97,9 @@ class UnityGLTFExporter:
     GLTFHeaderSize = 12
     SectionHeaderSize = 8
 
-    _primOwner: Dict[Tuple[Mesh, Material], int]
-    _meshToPrims: Dict[Mesh, List[Primitive]]
+    PrimKey = Tuple[Mesh, Material]
+    _primOwner: Dict[PrimKey, int] = {}
+    _meshToPrims: Dict[Mesh, List[Primitive]] = {}
 
     def __init__(self, gameObject: GameObject):
         # TODO : self._metalGlossChannelSwapMaterial
@@ -91,11 +113,29 @@ class UnityGLTFExporter:
         self._root.buffers.append(self._buffer)
         self._bufferId = len(self._root.buffers) - 1
 
+    @staticmethod
+    def AlignToBoundary(
+        writer: EndianBinaryWriter, pad: bytes = b" ", boundary: int = 4
+    ):
+        currentLength = writer.Length
+        newLength = UnityGLTFExporter.CalculateAlignment(currentLength, boundary)
+        writer.write_bytes(pad * (newLength - currentLength))
+
+    @staticmethod
+    def CalculateAlignment(currentSize: int, byteAlignment: int) -> int:
+        return (
+            math.floor((currentSize + byteAlignment - 1) / byteAlignment)
+            * byteAlignment
+        )
+
     def SaveGLTFandBin(self, path: str, fileName: str):
         self._shouldUseInternalBufferForImages = False
+        self._bufferWriter = EndianBinaryWriter(endian="<")
         self._root.scene = self.ExportScene(self._rootGameObject)
-        # TODO: Buffer stuff
-        self._root.save_json(os.path.join(path, fileName, ".json"))  # type: ignore
+        self.AlignToBoundary(self._bufferWriter, b"00")
+        self._buffer.byteLength = self.CalculateAlignment(self._bufferWriter.Length, 4)
+        self._root.set_binary_blob(self._bufferWriter.bytes)
+        self._root.save(os.path.join(path, fileName + ".gltf"), self._root.asset)
         self.ExportImages(path)
 
     def ExportImages(self, outputPath: str):
@@ -103,13 +143,10 @@ class UnityGLTFExporter:
             match (imgInfo.textureMapType):
                 case TextureMapType.MetallicGloss:
                     self.ExportMetallicGlossTexture(imgInfo.texture, outputPath)
-                    break
                 case TextureMapType.Bump:
                     self.ExportNormalTexture(imgInfo.texture, outputPath)
-                    break
                 case _:
                     self.ExportTexture(imgInfo.texture, outputPath)
-                    break
 
     def ExportMetallicGlossTexture(self, texture: Texture2D, outpath: str) -> None:
         raise NotImplementedError()
@@ -117,7 +154,7 @@ class UnityGLTFExporter:
     def ExportNormalTexture(self, texture: Texture2D, outpath: str) -> None:
         raise NotImplementedError()
 
-    def ExportTexture(self, texture: Texture2D, outpath: str) -> None:
+    def Export_Texture(self, texture: Texture2D, outpath: str) -> None:
         raise NotImplementedError()
 
     def ConstructImageFilenamePath(self, texture: Texture2D, outpath: str) -> str:
@@ -133,12 +170,16 @@ class UnityGLTFExporter:
     def ExportNode(self, gameobject: GameObject):
         node = Node(name=gameobject.name)
         transform = get_transform(gameobject)
-        node.translation = list(astuple(transform.m_LocalPosition))
-        node.scale = list(astuple(transform.m_LocalScale))
-        node.rotation = list(astuple(transform.m_LocalRotation))
+        pos = transform.m_LocalPosition
+        scale = transform.m_LocalScale
+        rot = transform.m_LocalRotation
+        node.translation = list((pos.X, pos.Y, pos.Z))
+        node.scale = list((scale.X, scale.Y, scale.Z))
+        node.rotation = list((rot.X, rot.Y, rot.Z, rot.W))
 
         self._root.nodes.append(node)
-        prims, nonPrims = self.FilterPrimitives(gameobject)
+        nodeId = len(self._root.nodes) - 1
+        prims, nonPrims = UnityGLTFExporter.FilterPrimitives(gameobject)
 
         if len(prims) > 0:
             node.mesh = self.ExportMesh(gameobject.name, prims)
@@ -170,33 +211,41 @@ class UnityGLTFExporter:
                         raise RuntimeError("material is not a Material")
                     self._primOwner[(mesh, material)] = node.mesh
         if len(nonPrims) > 0:
-            node.children = list()
-            [node.children.append(self.ExportNode(np)) for np in nonPrims]
+            node.children = [self.ExportNode(np) for np in nonPrims]
 
-        return len(self._root.nodes) - 1
+        return nodeId
 
-    def ContainsValidRenderer(self, gameobj: GameObject):
+    @staticmethod
+    def ContainsValidRenderer(gameobj: GameObject):
         return (
             gameobj.m_MeshFilter is not None and gameobj.m_MeshRenderer is not None
         ) or gameobj.m_SkinnedMeshRenderer is not None
 
-    def FilterPrimitives(self, gameobject: GameObject):
+    @staticmethod
+    def FilterPrimitives(gameobject: GameObject):
         primitives: List[GameObject] = list()
         nonPrimitives: List[GameObject] = list()
 
-        if self.ContainsValidRenderer(gameobject):
+        if UnityGLTFExporter.ContainsValidRenderer(gameobject):
             primitives.append(gameobject)
 
+        transform = get_transform(gameobject)
+        child_objects = [
+            c.get_obj().read().m_GameObject.get_obj().read()
+            for c in transform.m_Children
+        ]
+
         child: GameObject
-        for child in GOWithChildren(gameobject).child_objects:
-            if self.isPrimitive(child):
+        for child in child_objects:
+            if UnityGLTFExporter.isPrimitive(child):
                 primitives.append(child)
             else:
                 nonPrimitives.append(child)
 
         return primitives, nonPrimitives
 
-    def isPrimitive(self, gameobj: GameObject):
+    @staticmethod
+    def isPrimitive(gameobj: GameObject):
         transform = get_transform(gameobj)
         noChildren = len(transform.m_Children) == 0
         noTranslation = transform.m_LocalPosition == Vector3.Zero()
@@ -209,12 +258,47 @@ class UnityGLTFExporter:
             and noTranslation
             and noRotation
             and noScaling
-            and self.ContainsValidRenderer(gameobj)
+            and UnityGLTFExporter.ContainsValidRenderer(gameobj)
         )
 
     def ExportMesh(self, name: str, primitives: List[GameObject]):
-        # TODO: check cache for existing mesh
+        key: UnityGLTFExporter.PrimKey
+        existingMeshId: int | None = None
+        for prim in primitives:
+            smr = prim.m_SkinnedMeshRenderer
+            filter = prim.m_MeshFilter
+            renderer = prim.m_MeshRenderer
+            if smr:
+                smr = smr.get_obj().read()
+                assert isinstance(smr, SkinnedMeshRenderer)
+                mesh = smr.m_Mesh.get_obj().read()
+                assert isinstance(mesh, Mesh)
+                material = smr.m_Materials[0].get_obj().read()
+                assert isinstance(material, Material)
+                key = (mesh, material)
+            elif filter and renderer:
+                filter = filter.get_obj().read()
+                assert isinstance(filter, MeshFilter)
+                mesh = filter.m_Mesh.get_obj().read()
+                assert isinstance(mesh, Mesh)
+                renderer = renderer.get_obj().read()
+                assert isinstance(renderer, MeshRenderer)
+                material = renderer.m_Materials[0].get_obj().read()
+                assert isinstance(material, Material)
+                key = (mesh, material)
+            else:
+                raise RuntimeError("Unreachable")
+            tempMeshId = self._primOwner.get(key)
+            if tempMeshId and (existingMeshId is None or tempMeshId == existingMeshId):
+                existingMeshId = tempMeshId
+            else:
+                existingMeshId = None
+                break
+        if existingMeshId:
+            return existingMeshId
+
         mesh = GLTFMesh(name=name)
+        # sum is used to flatten the list by abbusing list()'s __add__ method
         mesh.primitives = sum([self.ExportPrimitive(p, mesh) for p in primitives], [])
         self._root.meshes.append(mesh)
         return len(self._root.meshes) - 1
@@ -249,21 +333,51 @@ class UnityGLTFExporter:
 
         prims: List[Primitive] = list()
 
-        if self._meshToPrims[meshobj] and len(self._meshToPrims[meshobj]) == len(
-            meshobj.m_SubMeshes
-        ):
+        primVariations = self._meshToPrims.get(meshobj)
+        if primVariations and len(primVariations) == len(meshobj.m_SubMeshes):
             for i in range(len(meshobj.m_SubMeshes)):
                 newPrim = self._meshToPrims[meshobj][i]
                 newPrim.material = self.ExportMaterial(materials[i])
                 prims[i] = newPrim
             return prims
 
-        aPosition = self.ExportAccessor_vec3(meshobj.m_Vertices)
-        aNormal = self.ExportAccessor_vec3(meshobj.m_Normals)
-        aTangent = self.ExportAccessor_vec4(meshobj.m_Tangents)
-        aTexcoord0 = self.ExportAccessor_vec2(meshobj.m_UV0)
-        aTexcoord1 = self.ExportAccessor_vec2(meshobj.m_UV2)
-        aColor0 = self.ExportAccessor_color(meshobj.m_Colors)
+        aPosition = self.ExportAccessor_vec3(
+            [
+                Vector3(*meshobj.m_Vertices[i : i + 3])
+                for i in range(0, len(meshobj.m_Vertices), 3)
+            ]
+        )
+        aNormal = self.ExportAccessor_vec3(
+            [
+                Vector3(*meshobj.m_Normals[i : i + 3])
+                for i in range(0, len(meshobj.m_Normals), 3)
+            ]
+        )
+        aTangent = self.ExportAccessor_vec4(
+            [
+                Vector4(*meshobj.m_Tangents[i : i + 4])
+                for i in range(0, len(meshobj.m_Tangents), 4)
+            ]
+        )
+        aTexcoord0 = self.ExportAccessor_vec2(
+            [
+                Vector2(*meshobj.m_UV0[i : i + 2])
+                for i in range(0, len(meshobj.m_UV0), 2)
+            ]
+        )
+        # aTexcoord1 = self.ExportAccessor_vec2(
+        #     [
+        #         Vector2(*meshobj.m_UV2[i : i + 2])
+        #         for i in range(0, len(meshobj.m_UV2), 2)
+        #     ]
+        # )
+        meshobj.m_Colors = list((255.0, 0.0, 0.0, 255.0))
+        aColor0 = self.ExportAccessor_color(
+            [
+                Color(*[c / 255 for c in meshobj.m_Colors[i : i + 4]])
+                for i in range(0, len(meshobj.m_Colors), 4)
+            ]
+        )
 
         lastMaterialId: int | None = None
 
@@ -277,7 +391,12 @@ class UnityGLTFExporter:
             p.indices = self.ExportAccessor_int(indices, True)
 
             p.attributes = Attributes(
-                aPosition, aNormal, aTangent, aTexcoord0, aTexcoord1, aColor0
+                # aPosition, aNormal, aTangent, aTexcoord0, aTexcoord1, aColor0
+                aPosition,
+                aNormal,
+                aTangent,
+                aTexcoord0,
+                COLOR_0=aColor0,
             )
 
             if i < len(materialsObj):
@@ -292,14 +411,15 @@ class UnityGLTFExporter:
                 # Only needed for SkinnedMeshRenderer
                 self.ExportBlendShapes(smr, meshobj, p, mesh)
 
-            prims[i] = p
+            prims.insert(i, p)
 
         self._meshToPrims[meshobj] = prims
 
         return prims
 
     def ExportMaterial(self, material: Material) -> int:
-        raise NotImplementedError()
+        pass
+        # raise NotImplementedError()
 
     def ExportBlendShapes(
         self,
@@ -335,7 +455,9 @@ class UnityGLTFExporter:
     def ExportPBRMetallicRoughness(self, material: Material) -> PbrMetallicRoughness:
         raise NotImplementedError()
 
-    def ExportCommonConstant(self, materialObj: Material) -> MaterialCommonConstant:
+    def ExportCommonConstant(
+        self, materialObj: Material
+    ) -> Any:  # -> MaterialCommonConstant:
         raise NotImplementedError()
 
     def ExportTextureInfo(
@@ -354,12 +476,48 @@ class UnityGLTFExporter:
     ) -> int:
         raise NotImplementedError()
 
-    def ExportSampler(self, texture: Texture) -> int:
-        raise NotImplementedError()
+    def ExportSampler(self, texture: Texture2D) -> int:
+        samplerId = self.GetSamplerId(texture)
+        if samplerId:
+            return samplerId
+        sampler = Sampler()
+
+        match (texture.m_TextureSettings.m_WrapMode):
+            case self.TextureWrapMode.Clamp:
+                sampler.wrapS = self.WrapMode.Clamp
+                sampler.wrapT = self.WrapMode.Clamp
+            case self.TextureWrapMode.Repeat:
+                sampler.wrapS = self.WrapMode.Repeat
+                sampler.wrapT = self.WrapMode.Repeat
+            case self.TextureWrapMode.Mirror:
+                sampler.wrapS = self.WrapMode.Mirror
+                sampler.wrapT = self.WrapMode.Mirror
+            case _:
+                sampler.wrapS = self.WrapMode.Repeat
+                sampler.wrapT = self.WrapMode.Repeat
+
+        match (texture.m_TextureSettings.m_FilterMode):
+            case self.FilterMode.Point:
+                sampler.minFilter = self.MinFilterMode.NearestMipmapNearest
+                sampler.magFilter = self.MagFilterMode.Nearest
+            case self.FilterMode.Bilinear:
+                sampler.minFilter = self.MinFilterMode.LinearMipmapNearest
+                sampler.magFilter = self.MagFilterMode.Linear
+            case self.FilterMode.Trilinear:
+                sampler.minFilter = self.MinFilterMode.LinearMipmapLinear
+                sampler.magFilter = self.MagFilterMode.Linear
+            case _:
+                print(
+                    "Unsupported Texture.filterMode: ",
+                    texture.m_TextureSettings.m_FilterMode,
+                    file=sys.stderr,
+                )
+                sampler.minFilter = self.MinFilterMode.LinearMipmapLinear
+                sampler.magFilter = self.MagFilterMode.Linear
 
     def ExportAccessor_int(self, values: List[int], isIndices: bool = False) -> int:
         count = len(values)
-        if count is 0:
+        if count == 0:
             raise RuntimeError("Accessors can not have a count of 0.")
         accessor = Accessor(count=count, type=AccessorTypeScalar)
 
@@ -372,22 +530,56 @@ class UnityGLTFExporter:
             if cur > max:
                 max = cur
 
-        accessor.min = list({min})
-        accessor.max = list({max})
+        accessor.min = list([min])
+        accessor.max = list([max])
 
-        # TODO: Buffer stuff
-        accessor.componentType = ComponentTypeUInt  # PLACEHOLDER
+        self.AlignToBoundary(self._bufferWriter, b"00")
+        byteOffset = self.CalculateAlignment(self._bufferWriter.Position, 4)
+
+        if max <= 255 and min >= 0:
+            accessor.componentType = ComponentTypeUnsignedByte
+            [self._bufferWriter.write_u_byte(val) for val in values]
+        elif max <= 127 and min >= -128 and not isIndices:
+            accessor.componentType = ComponentTypeByte
+            [self._bufferWriter.write_byte(val) for val in values]
+        elif max <= 32767 and min >= -32768 and not isIndices:
+            accessor.componentType = ComponentTypeShort
+            [self._bufferWriter.write_short(val) for val in values]
+        elif max <= 65535 and min >= 0:
+            accessor.componentType = ComponentTypeUnsignedShort
+            [self._bufferWriter.write_u_short(val) for val in values]
+        elif min >= 0:
+            accessor.componentType = ComponentTypeUnsignedInt
+            [self._bufferWriter.write_u_int(val) for val in values]
+        else:
+            accessor.componentType = ComponentTypeFloat
+            [self._bufferWriter.write_float(val) for val in values]
+
+        byteLength = self.CalculateAlignment(
+            self._bufferWriter.Position - byteOffset, 4
+        )
+
+        target = (
+            BUFFERVIEW_TARGETS.ELEMENT_ARRAY_BUFFER
+            if isIndices
+            else BUFFERVIEW_TARGETS.ARRAY_BUFFER
+        )
+        accessor.bufferView = self.ExportBufferView(byteOffset, byteLength, target)
 
         self._root.accessors.append(accessor)
 
         return len(self._root.accessors) - 1
 
     def AppendToBufferMultiplyOf4(self, byteOffset: int, byteLength: int) -> int:
-        raise NotImplementedError()
+        moduloOffset = byteLength % 4
+        if moduloOffset > 0:
+            self._bufferWriter.write_bytes(b"00" * (4 - moduloOffset))
+            byteLength = self._bufferWriter.Position - byteOffset
+        return byteLength
 
     def ExportAccessor_vec2(self, values: List[Vector2]) -> int:
         count = len(values)
-        if count is 0:
+        if count == 0:
             raise RuntimeError("Accessors can not have a count of 0.")
         accessor = Accessor(
             componentType=ComponentTypeFloat, count=count, type=AccessorTypeVec2
@@ -408,10 +600,19 @@ class UnityGLTFExporter:
             if cur.Y > maxY:
                 maxY = cur.Y
 
-        accessor.min = list({minX, minY})
-        accessor.max = list({maxX, maxY})
+        accessor.min = list([minX, minY])
+        accessor.max = list([maxX, maxY])
 
-        # TODO: Buffer stuff
+        self.AlignToBoundary(self._bufferWriter, b"00")
+        byteOffset = self.CalculateAlignment(self._bufferWriter.Position, 4)
+        for vec in values:
+            self._bufferWriter.write_float(vec.X)
+            self._bufferWriter.write_float(vec.Y)
+        byteLength = self.CalculateAlignment(
+            self._bufferWriter.Position - byteOffset, 4
+        )
+
+        accessor.bufferView = self.ExportBufferView(byteOffset, byteLength)
 
         self._root.accessors.append(accessor)
 
@@ -419,7 +620,7 @@ class UnityGLTFExporter:
 
     def ExportAccessor_vec3(self, values: List[Vector3]) -> int:
         count = len(values)
-        if count is 0:
+        if count == 0:
             raise RuntimeError("Accessors can not have a count of 0.")
         accessor = Accessor(
             componentType=ComponentTypeFloat, count=count, type=AccessorTypeVec3
@@ -446,10 +647,20 @@ class UnityGLTFExporter:
             if cur.Z > maxZ:
                 maxZ = cur.Z
 
-        accessor.min = list({minX, minY, minZ})
-        accessor.max = list({maxX, maxY, maxZ})
+        accessor.min = list([minX, minY, minZ])
+        accessor.max = list([maxX, maxY, maxZ])
 
-        # TODO: Buffer stuff
+        self.AlignToBoundary(self._bufferWriter, b"00")
+        byteOffset = self.CalculateAlignment(self._bufferWriter.Position, 4)
+        for vec in values:
+            self._bufferWriter.write_float(vec.X)
+            self._bufferWriter.write_float(vec.Y)
+            self._bufferWriter.write_float(vec.Z)
+        byteLength = self.CalculateAlignment(
+            self._bufferWriter.Position - byteOffset, 4
+        )
+
+        accessor.bufferView = self.ExportBufferView(byteOffset, byteLength)
 
         self._root.accessors.append(accessor)
 
@@ -457,7 +668,7 @@ class UnityGLTFExporter:
 
     def ExportAccessor_vec4(self, values: List[Vector4]) -> int:
         count = len(values)
-        if count is 0:
+        if count == 0:
             raise RuntimeError("Accessors can not have a count of 0.")
         accessor = Accessor(
             componentType=ComponentTypeFloat, count=count, type=AccessorTypeVec4
@@ -490,10 +701,21 @@ class UnityGLTFExporter:
             if cur.W > maxW:
                 maxW = cur.W
 
-        accessor.min = list({minX, minY, minZ, minW})
-        accessor.max = list({maxX, maxY, maxZ, maxW})
+        accessor.min = list([minX, minY, minZ, minW])
+        accessor.max = list([maxX, maxY, maxZ, maxW])
 
-        # TODO: Buffer stuff
+        self.AlignToBoundary(self._bufferWriter, b"00")
+        byteOffset = self.CalculateAlignment(self._bufferWriter.Position, 4)
+        for vec in values:
+            self._bufferWriter.write_float(vec.X)
+            self._bufferWriter.write_float(vec.Y)
+            self._bufferWriter.write_float(vec.Z)
+            self._bufferWriter.write_float(vec.W)
+        byteLength = self.CalculateAlignment(
+            self._bufferWriter.Position - byteOffset, 4
+        )
+
+        accessor.bufferView = self.ExportBufferView(byteOffset, byteLength)
 
         self._root.accessors.append(accessor)
 
@@ -501,7 +723,7 @@ class UnityGLTFExporter:
 
     def ExportAccessor_color(self, values: List[Color]) -> int:
         count = len(values)
-        if count is 0:
+        if count == 0:
             raise RuntimeError("Accessors can not have a count of 0.")
         accessor = Accessor(
             componentType=ComponentTypeFloat, count=count, type=AccessorTypeVec4
@@ -534,29 +756,96 @@ class UnityGLTFExporter:
             if cur.A > maxA:
                 maxA = cur.A
 
-        accessor.min = list({minR, minG, minB, minA})
-        accessor.max = list({maxR, maxG, maxB, maxA})
+        accessor.min = list([minR, minG, minB, minA])
+        accessor.max = list([maxR, maxG, maxB, maxA])
 
-        # TODO: Buffer stuff
+        self.AlignToBoundary(self._bufferWriter, b"00")
+        byteOffset = self.CalculateAlignment(self._bufferWriter.Position, 4)
+        for vec in values:
+            self._bufferWriter.write_float(vec.R)
+            self._bufferWriter.write_float(vec.G)
+            self._bufferWriter.write_float(vec.B)
+            self._bufferWriter.write_float(vec.A)
+        byteLength = self.CalculateAlignment(
+            self._bufferWriter.Position - byteOffset, 4
+        )
+
+        accessor.bufferView = self.ExportBufferView(byteOffset, byteLength)
 
         self._root.accessors.append(accessor)
 
         return len(self._root.accessors) - 1
 
-    def ExportBufferView(self, byteOffset: int, byteLength: int) -> int:
-        raise NotImplementedError()
+    def ExportBufferView(
+        self,
+        byteOffset: int,
+        byteLength: int,
+        target: BUFFERVIEW_TARGETS = BUFFERVIEW_TARGETS.ARRAY_BUFFER,
+    ) -> int:
+        bufferView = BufferView(
+            buffer=self._bufferId,
+            byteOffset=byteOffset,
+            byteLength=byteLength,
+            target=target,
+        )
+        self._root.bufferViews.append(bufferView)
+        return len(self._root.bufferViews) - 1
 
-    def GetMaterialId(self, root: GLTF2, materialObj: Material) -> int:
-        raise NotImplementedError()
+    def GetMaterialId(self, materialObj: Material) -> int | None:
+        for i, material in enumerate(self._materials):
+            if material == materialObj:
+                return i
+        return None
 
-    def GetTextureId(self, root: GLTF2, textureObj: Texture) -> int:
-        raise NotImplementedError()
+    def GetTextureId(self, textureObj: Texture) -> int | None:
+        for i, texture in enumerate(self._textures):
+            if texture == textureObj:
+                return i
+        return None
 
-    def GetImageId(self, root: GLTF2, imageObj: Texture) -> int:
-        raise NotImplementedError()
+    def GetImageId(self, imageObj: Texture) -> int | None:
+        for i, imgInfo in enumerate(self._imageInfos):
+            if imgInfo.texture == imageObj:
+                return i
+        return None
 
-    def GetSamplerId(self, root: GLTF2, textureObj: Texture) -> int:
-        raise NotImplementedError()
+    def GetSamplerId(self, textureObj: Texture2D) -> int | None:
+        for i, sampler in enumerate(self._root.samplers):
+            filterIsNearest = (
+                sampler.minFilter == self.MinFilterMode.Nearest
+                or sampler.minFilter == self.MinFilterMode.NearestMipmapNearest
+                or sampler.minFilter == self.MinFilterMode.NearestMipmapLinear
+            )
+
+            filterIsLinear = (
+                sampler.minFilter == self.MinFilterMode.Linear
+                or sampler.minFilter == self.MinFilterMode.LinearMipmapNearest
+            )
+
+            filterMatched = (
+                textureObj.m_TextureSettings.m_FilterMode == self.FilterMode.Point
+                and filterIsNearest
+                or textureObj.m_TextureSettings.m_FilterMode == self.FilterMode.Bilinear
+                and filterIsLinear
+                or textureObj.m_TextureSettings.m_FilterMode
+                == self.FilterMode.Trilinear
+                and sampler.minFilter == self.MinFilterMode.LinearMipmapLinear
+            )
+
+            wrapMatched = (
+                textureObj.m_TextureSettings.m_WrapMode == self.TextureWrapMode.Clamp
+                and sampler.wrapS == WRAPPING_MODES.CLAMP_TO_EDGE
+                or textureObj.m_TextureSettings.m_WrapMode
+                == self.TextureWrapMode.Repeat
+                and sampler.wrapS == WRAPPING_MODES.REPEAT
+                or textureObj.m_TextureSettings.m_WrapMode
+                == self.TextureWrapMode.Mirror
+                and sampler.wrapS == WRAPPING_MODES.MIRRORED_REPEAT
+            )
+
+            if filterMatched and wrapMatched:
+                return i
+        return None
 
     def GetDrawMode(self, topology: GfxPrimitiveType) -> int:
 
@@ -589,7 +878,38 @@ class UnityGLTFExporter:
         return [i + subMesh.baseVertex for i in indices] if applyBaseVertex else indices
 
     def FlipTriangleFaces(self, indices: List[int]):
-        for i in range(len(indices)):
+        for i in range(0, len(indices), 3):
             temp = indices[i]
             indices[i] = indices[i + 2]
             indices[i + 2] = temp
+
+    class MinFilterMode(IntEnum):
+        NONE = 0
+        Nearest = 9728
+        Linear = 9729
+        NearestMipmapNearest = 9984
+        LinearMipmapNearest = 9985
+        NearestMipmapLinear = 9986
+        LinearMipmapLinear = 9987
+
+    class MagFilterMode(IntEnum):
+        NONE = 0
+        Nearest = 9728
+        Linear = 9729
+
+    class FilterMode(IntEnum):
+        Point = 0
+        Bilinear = 1
+        Trilinear = 2
+
+    class TextureWrapMode(IntEnum):
+        Repeat = 0
+        Clamp = 1
+        Mirror = 2
+        MirrorOnce = 3
+
+    class WrapMode(IntEnum):
+        Repeat = 0
+        Clamp = 1
+        Mirror = 2
+        MirrorOnce = 3

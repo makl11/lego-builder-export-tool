@@ -1,11 +1,14 @@
+import os
+import shutil
 import xml.etree.ElementTree as ET
 from json import load as parseJson
 from pprint import PrettyPrinter
+from typing import Any
 from urllib.request import urlopen
 
-from UnityPy import load as loadUnityFile
-
 from typings import Brick, BuildingInstruction, ModelInfo
+from Unity2GLTF.UnityGLTFExporter import UnityGLTFExporter
+from UnityPy import load as loadUnityFile
 
 pp = PrettyPrinter(indent=4)
 BASE_URL = "https://dbix.services.lego.com/api/v1"
@@ -85,7 +88,9 @@ if __name__ == "__main__":
 
             resolve_game_object_structure(main)
 
-            pp.pprint(main)
+            shutil.rmtree("./out", ignore_errors=True)
+            os.mkdir("./out")
+            UnityGLTFExporter(main).SaveGLTFandBin("./out", brick.id)
 
             ### break after first iteration until code for processing a step and its bricks is done
             break
