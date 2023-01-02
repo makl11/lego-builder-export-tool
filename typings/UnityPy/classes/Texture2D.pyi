@@ -7,6 +7,8 @@ from ..enums import TextureFormat
 from ..streams import EndianBinaryWriter
 
 class Texture2D(Texture):
+    m_Width: int
+    m_Height: int
     @property
     def image(self): ...
     @image.setter
@@ -34,5 +36,7 @@ class StreamingInfo:
     def save(self, writer, version): ...
 
 class GLTextureSettings:
+    m_FilterMode: int
+    m_WrapMode: int
     def __init__(self, reader, version) -> None: ...
     def save(self, writer, version): ...
