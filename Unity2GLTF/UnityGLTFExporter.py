@@ -2,7 +2,7 @@ import math
 import os
 import sys
 from dataclasses import dataclass
-from enum import IntEnum, auto
+from enum import IntEnum
 from typing import Any, Dict, List, Tuple
 
 from pygltflib import ARRAY_BUFFER
@@ -40,11 +40,12 @@ from UnityPy.classes import (
     SkinnedMeshRenderer,
     Texture,
     Texture2D,
+    Transform,
 )
 from UnityPy.classes.Mesh import SubMesh
 from UnityPy.classes.Object import NodeHelper
 from UnityPy.enums import GfxPrimitiveType
-from UnityPy.math import Color, Vector2, Vector3, Vector4
+from UnityPy.math import Color, Quaternion, Vector2, Vector3, Vector4
 from UnityPy.streams import EndianBinaryWriter
 
 from .util import get_transform
@@ -63,12 +64,12 @@ class WRAPPING_MODES(IntEnum):
 
 class TextureMapType(IntEnum):
     Main = 0
-    Bump = auto()
-    SpecGloss = auto()
-    Emission = auto()
-    MetallicGloss = auto()
-    Light = auto()
-    Occlusion = auto()
+    Bump = 1
+    SpecGloss = 2
+    Emission = 3
+    MetallicGloss = 4
+    Light = 5
+    Occlusion = 6
 
 
 class UnityGLTFExporter:
@@ -146,7 +147,7 @@ class UnityGLTFExporter:
                 case TextureMapType.Bump:
                     self.ExportNormalTexture(imgInfo.texture, outputPath)
                 case _:
-                    self.ExportTexture(imgInfo.texture, outputPath)
+                    self.Export_Texture(imgInfo.texture, outputPath)
 
     def ExportMetallicGlossTexture(self, texture: Texture2D, outpath: str) -> None:
         raise NotImplementedError()
@@ -169,13 +170,7 @@ class UnityGLTFExporter:
 
     def ExportNode(self, gameobject: GameObject):
         node = Node(name=gameobject.name)
-        transform = get_transform(gameobject)
-        pos = transform.m_LocalPosition
-        scale = transform.m_LocalScale
-        rot = transform.m_LocalRotation
-        node.translation = list((pos.X, pos.Y, pos.Z))
-        node.scale = list((scale.X, scale.Y, scale.Z))
-        node.rotation = list((rot.X, rot.Y, rot.Z, rot.W))
+        node = self.SetUnityTransform(node, get_transform(gameobject))
 
         self._root.nodes.append(node)
         nodeId = len(self._root.nodes) - 1
@@ -342,42 +337,66 @@ class UnityGLTFExporter:
             return prims
 
         aPosition = self.ExportAccessor_vec3(
-            [
-                Vector3(*meshobj.m_Vertices[i : i + 3])
-                for i in range(0, len(meshobj.m_Vertices), 3)
-            ]
+            self.ConvertVector3CoordinateSpaceAndCopy(
+                [
+                    Vector3(*meshobj.m_Vertices[i : i + 3])
+                    for i in range(0, len(meshobj.m_Vertices), 3)
+                ],
+                Vector3(-1, 1, 1),
+            )
         )
-        aNormal = self.ExportAccessor_vec3(
-            [
-                Vector3(*meshobj.m_Normals[i : i + 3])
-                for i in range(0, len(meshobj.m_Normals), 3)
-            ]
-        )
-        aTangent = self.ExportAccessor_vec4(
-            [
-                Vector4(*meshobj.m_Tangents[i : i + 4])
-                for i in range(0, len(meshobj.m_Tangents), 4)
-            ]
-        )
-        aTexcoord0 = self.ExportAccessor_vec2(
-            [
-                Vector2(*meshobj.m_UV0[i : i + 2])
-                for i in range(0, len(meshobj.m_UV0), 2)
-            ]
-        )
-        # aTexcoord1 = self.ExportAccessor_vec2(
-        #     [
-        #         Vector2(*meshobj.m_UV2[i : i + 2])
-        #         for i in range(0, len(meshobj.m_UV2), 2)
-        #     ]
-        # )
-        meshobj.m_Colors = list((255.0, 0.0, 0.0, 255.0))
-        aColor0 = self.ExportAccessor_color(
-            [
-                Color(*[c / 255 for c in meshobj.m_Colors[i : i + 4]])
-                for i in range(0, len(meshobj.m_Colors), 4)
-            ]
-        )
+
+        aNormal, aTangent, aTexcoord0, aTexcoord1, aColor0 = [None for _ in range(5)]
+
+        if meshobj.m_Normals and len(meshobj.m_Normals):
+            aNormal = self.ExportAccessor_vec3(
+                self.ConvertVector3CoordinateSpaceAndCopy(
+                    [
+                        Vector3(*meshobj.m_Normals[i : i + 3])
+                        for i in range(0, len(meshobj.m_Normals), 3)
+                    ],
+                    Vector3(-1, 1, 1),
+                )
+            )
+
+        if meshobj.m_Tangents and len(meshobj.m_Tangents):
+            aTangent = self.ExportAccessor_vec4(
+                self.ConvertVector4CoordinateSpaceAndCopy(
+                    [
+                        Vector4(*meshobj.m_Tangents[i : i + 4])
+                        for i in range(0, len(meshobj.m_Tangents), 4)
+                    ],
+                    Vector4(-1, 1, 1, -1),
+                )
+            )
+
+        if meshobj.m_UV0 and len(meshobj.m_UV0):
+            aTexcoord0 = self.ExportAccessor_vec2(
+                self.FlipTexCoordArrayVAndCopy(
+                    [
+                        Vector2(*meshobj.m_UV0[i : i + 2])
+                        for i in range(0, len(meshobj.m_UV0), 2)
+                    ]
+                )
+            )
+
+        if meshobj.m_UV2 and len(meshobj.m_UV2):
+            aTexcoord1 = self.ExportAccessor_vec2(
+                self.FlipTexCoordArrayVAndCopy(
+                    [
+                        Vector2(*meshobj.m_UV2[i : i + 2])
+                        for i in range(0, len(meshobj.m_UV2), 2)
+                    ]
+                )
+            )
+
+        if meshobj.m_Colors and len(meshobj.m_Colors):
+            aColor0 = self.ExportAccessor_color(
+                [
+                    Color(*meshobj.m_Colors[i : i + 4])
+                    for i in range(0, len(meshobj.m_Colors), 4)
+                ]
+            )
 
         lastMaterialId: int | None = None
 
@@ -390,14 +409,17 @@ class UnityGLTFExporter:
             p.mode = self.GetDrawMode(topology)
             p.indices = self.ExportAccessor_int(indices, True)
 
-            p.attributes = Attributes(
-                # aPosition, aNormal, aTangent, aTexcoord0, aTexcoord1, aColor0
-                aPosition,
-                aNormal,
-                aTangent,
-                aTexcoord0,
-                COLOR_0=aColor0,
-            )
+            p.attributes = Attributes(POSITION=aPosition)
+            if aNormal:
+                p.attributes.NORMAL = aNormal
+            if aTangent:
+                p.attributes.TANGENT = aTangent
+            if aTexcoord0:
+                p.attributes.TEXCOORD_0 = aTexcoord0
+            if aTexcoord1:
+                p.attributes.TEXCOORD_1 = aTexcoord1
+            if aColor0:
+                p.attributes.COLOR_0 = aColor0
 
             if i < len(materialsObj):
                 p.material = self.ExportMaterial(materials[i])
@@ -864,13 +886,73 @@ class UnityGLTFExporter:
                 )
 
     ### CUSTOM PART ###
+    @staticmethod
+    def SetUnityTransform(node: Node, transform: Transform):
+        pos = UnityGLTFExporter.UnityToGltfVector3Convert(transform.m_LocalPosition)
+        scale = transform.m_LocalScale
+        rot = UnityGLTFExporter.UnityToGltfQuaternionConvert(transform.m_LocalRotation)
+        if pos != Vector3.Zero():
+            node.translation = list((pos.X, pos.Y, pos.Z))
+        if scale != Vector3.One():
+            node.scale = list((scale.X, scale.Y, scale.Z))
+        if rot.X != 0 and rot.Y != 0 and rot.Z != 0 and rot.W != 1:
+            node.rotation = list((rot.X, rot.Y, rot.Z, rot.W))
+        return node
+
+    @staticmethod
+    def ConvertVector3CoordinateSpaceAndCopy(
+        vector3s: List[Vector3], coordinateSpaceCoordinateScale: Vector3
+    ):
+        return [
+            Vector3(
+                vector.X * coordinateSpaceCoordinateScale.X,
+                vector.Y * coordinateSpaceCoordinateScale.Y,
+                vector.Z * coordinateSpaceCoordinateScale.Z,
+            )
+            for vector in vector3s
+        ]
+
+    @staticmethod
+    def ConvertVector4CoordinateSpaceAndCopy(
+        vector4s: List[Vector4 | Quaternion], coordinateSpaceCoordinateScale: Vector4
+    ):
+        return [
+            Vector4(
+                vector.X * coordinateSpaceCoordinateScale.X,
+                vector.Y * coordinateSpaceCoordinateScale.Y,
+                vector.Z * coordinateSpaceCoordinateScale.Z,
+                vector.W * coordinateSpaceCoordinateScale.W,
+            )
+            for vector in vector4s
+        ]
+
+    @staticmethod
+    def FlipTexCoordArrayVAndCopy(vector2s: List[Vector2]):
+        return [Vector2(vector.X, 1.0 - vector.Y) for vector in vector2s]
+
+    @staticmethod
+    def UnityToGltfVector3Convert(vector3: Vector3):
+        return Vector3(vector3.X * -1.0, vector3.Y * 1.0, vector3.Z * 1.0)
+
+    @staticmethod
+    def UnityToGltfVector4Convert(vector4: Vector4):
+        return Vector4(
+            vector4.X * -1,
+        )
+
+    @staticmethod
+    def UnityToGltfQuaternionConvert(quaternion: Quaternion):
+        return Quaternion(
+            quaternion.X * 1.0, quaternion.Y * -1.0, quaternion.Z * -1.0, quaternion.W
+        )
+
     class DrawMode(IntEnum):
         Points = 0
-        Lines = auto()
-        LineStrip = auto()
-        Triangles = auto()
+        Lines = 1
+        LineStrip = 3
+        Triangles = 4
 
-    def Mesh_GetIndices(  # TODO: Verify this is correct
+    def Mesh_GetIndices(
         self, mesh: Mesh, subMesh: SubMesh, applyBaseVertex: bool = True
     ) -> List[int]:
         firstIndex = subMesh.firstByte // (2 if mesh.m_Use16BitIndices else 4)
