@@ -1,8 +1,10 @@
 import math
 import os
 import sys
+import urllib.parse
 from dataclasses import dataclass
 from enum import IntEnum
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from pygltflib import ARRAY_BUFFER
@@ -19,6 +21,8 @@ from pygltflib import VEC2 as AccessorTypeVec2
 from pygltflib import VEC3 as AccessorTypeVec3
 from pygltflib import VEC4 as AccessorTypeVec4
 from pygltflib import Accessor, Asset, Attributes, Buffer, BufferView
+from pygltflib import Image as GLTFImage
+from pygltflib import Material as GLTFMaterial
 from pygltflib import Mesh as GLTFMesh
 from pygltflib import Node
 from pygltflib import NormalMaterialTexture as NormalTextureInfo
@@ -28,15 +32,16 @@ from pygltflib import (
     Primitive,
     Sampler,
     Scene,
-    TextureInfo,
 )
-
+from pygltflib import Texture as GLTFTexture
+from pygltflib import TextureInfo
 from UnityPy.classes import (
     GameObject,
     Material,
     Mesh,
     MeshFilter,
     MeshRenderer,
+    Shader,
     SkinnedMeshRenderer,
     Texture,
     Texture2D,
@@ -150,16 +155,28 @@ class UnityGLTFExporter:
                     self.Export_Texture(imgInfo.texture, outputPath)
 
     def ExportMetallicGlossTexture(self, texture: Texture2D, outpath: str) -> None:
-        raise NotImplementedError()
+        self.Export_Texture(texture, outpath)
+        # TODO: poperly handle MetallicGlossTexture
+        # var destRenderTexture = RenderTexture.GetTemporary(texture.width, texture.height, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+        # Graphics.Blit(texture, destRenderTexture, _metalGlossChannelSwapMaterial);
 
     def ExportNormalTexture(self, texture: Texture2D, outpath: str) -> None:
-        raise NotImplementedError()
+        self.Export_Texture(texture, outpath)
+        # TODO: poperly handle NormalTexture
+        # var destRenderTexture = RenderTexture.GetTemporary(texture.width, texture.height, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+        # Graphics.Blit(texture, destRenderTexture, _normalChannelMaterial);
 
     def Export_Texture(self, texture: Texture2D, outpath: str) -> None:
-        raise NotImplementedError()
+        finalFilenamePath = self.ConstructImageFilenamePath(texture, outpath)
+        texture.image.save(finalFilenamePath)
 
-    def ConstructImageFilenamePath(self, texture: Texture2D, outpath: str) -> str:
-        raise NotImplementedError()
+    def ConstructImageFilenamePath(self, texture: Texture2D, outpath: str) -> Path:
+        imagePath = texture.container
+        if imagePath == None or imagePath == "":
+            imagePath = texture.name
+        path = Path(outpath, imagePath)
+        os.makedirs(path.parent, exist_ok=True)
+        return path.with_suffix(".png")
 
     def ExportScene(self, gameobject: GameObject):
         scene = Scene(name=gameobject.name)
@@ -225,12 +242,11 @@ class UnityGLTFExporter:
             primitives.append(gameobject)
 
         transform = get_transform(gameobject)
-        child_objects = [
+        child_objects: List[GameObject] = [
             c.get_obj().read().m_GameObject.get_obj().read()
             for c in transform.m_Children
         ]
 
-        child: GameObject
         for child in child_objects:
             if UnityGLTFExporter.isPrimitive(child):
                 primitives.append(child)
@@ -243,11 +259,22 @@ class UnityGLTFExporter:
     def isPrimitive(gameobj: GameObject):
         transform = get_transform(gameobj)
         noChildren = len(transform.m_Children) == 0
-        noTranslation = transform.m_LocalPosition == Vector3.Zero()
-        r = transform.m_LocalRotation
-        noRotation = r.X == 0 and r.Y == 0 and r.Z == 0 and r.W == 1
-        noScaling = transform.m_LocalScale == Vector3.One()
-
+        noTranslation = (
+            transform.m_LocalPosition.X == 0
+            and transform.m_LocalPosition.Y == 0
+            and transform.m_LocalPosition.Z == 0
+        )
+        noRotation = (
+            transform.m_LocalRotation.X == 0
+            and transform.m_LocalRotation.Y == 0
+            and transform.m_LocalRotation.Z == 0
+            and transform.m_LocalRotation.W == 1
+        )
+        noScaling = (
+            transform.m_LocalScale.X == 1
+            and transform.m_LocalScale.Y == 1
+            and transform.m_LocalScale.Z == 1
+        )
         return (
             noChildren
             and noTranslation
@@ -439,9 +466,124 @@ class UnityGLTFExporter:
 
         return prims
 
-    def ExportMaterial(self, material: Material) -> int:
-        pass
-        # raise NotImplementedError()
+    def ExportMaterial(self, materialObj: Material) -> int:
+        materialId = self.GetMaterialId(materialObj)
+        if materialId:
+            return materialId
+        keywords: str | List[str] = (
+            materialObj.m_ValidKeywords
+            if materialObj.version >= (2021, 3)
+            else materialObj.m_ShaderKeywords
+        )
+        shader: Shader = materialObj.m_Shader.get_obj().read()
+        tags: Dict[str, Any] = {}
+        for subShader in shader.m_ParsedForm.m_SubShaders:
+            shaderTags = subShader.m_Tags.tags
+            if not tags:
+                tags = {}
+            if isinstance(shaderTags, list):
+                shaderTags = dict(shaderTags)
+            if isinstance(shaderTags, dict):
+                tags = tags | shaderTags
+            else:
+                raise RuntimeError("Unreachable")
+
+        material = GLTFMaterial(name=materialObj.m_Name)
+
+        if "_Cutoff" in materialObj.m_SavedProperties.m_Floats:
+            material.alphaCutoff = materialObj.m_SavedProperties.m_Floats["_Cutoff"]
+
+        match tags.get("RenderType"):
+            case "TransparentCutout":
+                material.alphaMode = "MASK"
+            case "Transparent":
+                material.alphaMode = "BLEND"
+            case _:
+                material.alphaMode = "OPAQUE"
+
+        material.doubleSided = bool(
+            "_Cull" in materialObj.m_SavedProperties.m_Floats
+            and materialObj.m_SavedProperties.m_Floats["_Cull"] == 0
+        )
+
+        if "_EMISSION" in keywords:
+            if "_EmissionColor" in materialObj.m_SavedProperties.m_Colors:
+                color = materialObj.m_SavedProperties.m_Colors["_EmissionColor"]
+                material.emissiveFactor = list((color.R, color.G, color.B))
+
+            if "_EmissionMap" in materialObj.m_SavedProperties.m_TexEnvs:
+                emissionTex = (
+                    materialObj.m_SavedProperties.m_TexEnvs["_EmissionMap"]
+                    .m_Texture.get_obj()
+                    .read()
+                )
+                if emissionTex != None:
+                    if isinstance(emissionTex, Texture2D):
+                        material.emissiveTexture = self.ExportTextureInfo(
+                            emissionTex, TextureMapType.Emission
+                        )
+                        self.ExportTextureTransform(
+                            material.emissiveTexture, materialObj, "_EmissionMap"
+                        )
+                    else:
+                        print(
+                            f"Can't export a {emissionTex} emissive texture in material {materialObj.m_Name}",
+                            file=sys.stderr,
+                        )
+            if (
+                materialObj.m_SavedProperties.m_TexEnvs["_BumpMap"]
+                and "_NORMALMAP" in keywords
+            ):
+                normalTex = (
+                    materialObj.m_SavedProperties.m_TexEnvs["_BumpMap"]
+                    .m_Texture.get_obj()
+                    .read()
+                )
+
+                if normalTex != None:
+                    if isinstance(normalTex, Texture2D):
+                        material.normalTexture = self.ExportNormalTextureInfo(
+                            normalTex, TextureMapType.Bump, materialObj
+                        )
+                        self.ExportTextureTransform(
+                            material.normalTexture, materialObj, "_BumpMap"
+                        )
+                    else:
+                        print(
+                            f"Can't export a {normalTex} normal texture in material {materialObj.m_Name}",
+                            file=sys.stderr,
+                        )
+
+            if "_OcclusionMap" in materialObj.m_SavedProperties.m_TexEnvs:
+                occTex = (
+                    materialObj.m_SavedProperties.m_TexEnvs["_OcclusionMap"]
+                    .m_Texture.get_obj()
+                    .read()
+                )
+                if occTex != None:
+                    if isinstance(occTex, Texture2D):
+                        material.occlusionTexture = self.ExportOcclusionTextureInfo(
+                            occTex, TextureMapType.Occlusion, materialObj
+                        )
+                        self.ExportTextureTransform(
+                            material.occlusionTexture, materialObj, "_OcclusionMap"
+                        )
+                    else:
+                        print(
+                            f"Can't export a {occTex} occlusion texture in material {materialObj.m_Name}",
+                            file=sys.stderr,
+                        )
+
+        if (
+            "_Metallic" in materialObj.m_SavedProperties.m_Floats
+            and "_MetallicGlossMap" in materialObj.m_SavedProperties.m_TexEnvs
+        ):
+            material.pbrMetallicRoughness = self.ExportPBRMetallicRoughness(materialObj)
+
+        self._materials.append(materialObj)
+        self._root.materials.append(material)
+
+        return len(self._root.materials) - 1
 
     def ExportBlendShapes(
         self,
@@ -452,46 +594,192 @@ class UnityGLTFExporter:
     ):
         raise NotImplementedError()
 
-    # TODO: Implememt all these methods
-    def IsPBRMetallicRoughness(self, material: Material) -> bool:
-        raise NotImplementedError()
-
-    def IsCommonConstant(self, material: Material) -> bool:
-        raise NotImplementedError()
-
     def ExportTextureTransform(
-        self, info: TextureInfo, mat: Material, texName: str
+        self, info: TextureInfo, materialObj: Material, texName: str
     ) -> None:
-        raise NotImplementedError()
+        texture = materialObj.m_SavedProperties.m_TexEnvs[texName]
+        offset: Vector2 = texture.m_Offset
+        scale: Vector2 = texture.m_Scale
+        if offset.X == 0 and offset.Y == 0 and scale.X == 1 and scale.Y == 1:
+            return
+
+        if not "KHR_texture_transform" in self._root.extensionsUsed:
+            self._root.extensionsUsed.append("KHR_texture_transform")
+
+        if info.extensions == None:
+            info.extensions = dict()
+
+        textureTransform = {}
+        if not (offset.X == 0 and offset.Y == 0):
+            textureTransform["offset"] = list((offset.X, offset.Y))
+        # TODO: support rotation
+        if not (scale.X == 1 and scale.Y == 1):
+            textureTransform["scale"] = list((scale.X, scale.Y))
+        # TODO: support texCoord
+
+        info.extensions["KHR_texture_transform"] = textureTransform
 
     def ExportNormalTextureInfo(
-        self, texture: Texture, textureMapType: TextureMapType, material: Material
+        self, texture: Texture2D, textureMapType: TextureMapType, material: Material
     ) -> NormalTextureInfo:
-        raise NotImplementedError()
+        info = NormalTextureInfo(index=self.ExportTexture(texture, textureMapType))
+
+        if "_BumpScale" in material.m_SavedProperties.m_Floats:
+            info.scale = material.m_SavedProperties.m_Floats["_BumpScale"]
+
+        return info
 
     def ExportOcclusionTextureInfo(
-        self, texture: Texture, textureMapType: TextureMapType, material: Material
+        self, texture: Texture2D, textureMapType: TextureMapType, material: Material
     ) -> OcclusionTextureInfo:
-        raise NotImplementedError()
+        info = OcclusionTextureInfo(index=self.ExportTexture(texture, textureMapType))
 
-    def ExportPBRMetallicRoughness(self, material: Material) -> PbrMetallicRoughness:
-        raise NotImplementedError()
+        if "_OcclusionStrength" in material.m_SavedProperties.m_Floats:
+            info.strength = material.m_SavedProperties.m_Floats["_OcclusionStrength"]
 
-    def ExportCommonConstant(
-        self, materialObj: Material
-    ) -> Any:  # -> MaterialCommonConstant:
-        raise NotImplementedError()
+        return info
+
+    def ExportPBRMetallicRoughness(self, materialObj: Material) -> PbrMetallicRoughness:
+        pbr = PbrMetallicRoughness()
+
+        if "_Color" in materialObj.m_SavedProperties.m_Colors:
+            color = materialObj.m_SavedProperties.m_Colors["_Color"]
+            pbr.baseColorFactor = list((color.R, color.G, color.B, color.A))
+
+        if "_MainTex" in materialObj.m_SavedProperties.m_TexEnvs:
+            mainTex = (
+                materialObj.m_SavedProperties.m_TexEnvs["_MainTex"]
+                .m_Texture.get_obj()
+                .read()
+            )
+            if mainTex != None:
+                if isinstance(mainTex, Texture2D):
+                    pbr.baseColorTexture = self.ExportTextureInfo(
+                        mainTex, TextureMapType.Main
+                    )
+                    self.ExportTextureTransform(
+                        pbr.baseColorTexture, materialObj, "_MainTex"
+                    )
+                else:
+                    print(
+                        f"Can't export a {mainTex} base texture in material {materialObj.name}",
+                        file=sys.stderr,
+                    )
+
+        if "_Metallic" in materialObj.m_SavedProperties.m_Floats:
+            metallicGlossMap = (
+                (
+                    materialObj.m_SavedProperties.m_TexEnvs["_MetallicGlossMap"]
+                    .m_Texture.get_obj()
+                    .read()
+                )
+                if "_MetallicGlossMap" in materialObj.m_SavedProperties.m_TexEnvs
+                else None
+            )
+            pbr.metallicFactor = (
+                1.0
+                if (metallicGlossMap != None)
+                else materialObj.m_SavedProperties.m_Floats["_Metallic"]
+            )
+
+        if "_Glossiness" in materialObj.m_SavedProperties.m_Floats:
+            metallicGlossMap = (
+                (
+                    materialObj.m_SavedProperties.m_TexEnvs["_MetallicGlossMap"]
+                    .m_Texture.get_obj()
+                    .read()
+                )
+                if "_MetallicGlossMap" in materialObj.m_SavedProperties.m_TexEnvs
+                else None
+            )
+            pbr.roughnessFactor = (
+                1.0
+                if (metallicGlossMap != None)
+                else 1.0 - material.m_SavedProperties.m_Floats["_Glossiness"]
+            )
+
+        if "_MetallicGlossMap" in materialObj.m_SavedProperties.m_TexEnvs:
+            mrTex: Texture | None = (
+                materialObj.m_SavedProperties.m_TexEnvs["_MetallicGlossMap"]
+                .m_Texture.get_obj()
+                .read()
+            )
+            if mrTex != None:
+                if isinstance(mrTex, Texture2D):
+                    pbr.metallicRoughnessTexture = self.ExportTextureInfo(
+                        mrTex, TextureMapType.MetallicGloss
+                    )
+                    self.ExportTextureTransform(
+                        pbr.metallicRoughnessTexture, materialObj, "_MetallicGlossMap"
+                    )
+                else:
+                    print(
+                        f"Can't export a {mrTex} metallic smoothness texture in material {materialObj.name}"
+                    )
+        elif "_SpecGlossMap" in materialObj.m_SavedProperties.m_TexEnvs:
+            mgTex = (
+                materialObj.m_SavedProperties.m_TexEnvs["_SpecGlossMap"]
+                .m_Texture.get_obj()
+                .read()
+            )
+            if mgTex != None:
+                if isinstance(mgTex, Texture2D):
+                    pbr.metallicRoughnessTexture = self.ExportTextureInfo(
+                        mgTex, TextureMapType.SpecGloss
+                    )
+                    self.ExportTextureTransform(
+                        pbr.metallicRoughnessTexture, materialObj, "_SpecGlossMap"
+                    )
+                else:
+                    print(
+                        f"Can't export a {mgTex} metallic roughness texture in material {materialObj.name}"
+                    )
+        return pbr
 
     def ExportTextureInfo(
-        self, texture: Texture, textureMapType: TextureMapType
+        self, texture: Texture2D, textureMapType: TextureMapType
     ) -> TextureInfo:
-        raise NotImplementedError()
+        return TextureInfo(index=self.ExportTexture(texture, textureMapType))
 
-    def ExportTexture(self, textureObj: Texture, textureMapType: TextureMapType) -> int:
-        raise NotImplementedError()
+    def ExportTexture(
+        self, textureObj: Texture2D, textureMapType: TextureMapType
+    ) -> int:
+        id = self.GetTextureId(textureObj)
+        if id != None:
+            return id
+        texture = GLTFTexture()
 
-    def ExportImage(self, texture: Texture, texturMapType: TextureMapType) -> int:
-        raise NotImplementedError()
+        if textureObj.name == "":
+            textureObj.name = str(len(self._root.textures) + 1)
+
+            texture.name = textureObj.name
+
+        if self._shouldUseInternalBufferForImages:
+            texture.source = self.ExportImageInternalBuffer(textureObj, textureMapType)
+        else:
+            texture.source = self.ExportImage(textureObj, textureMapType)
+        texture.sampler = self.ExportSampler(textureObj)
+
+        self._textures.append(textureObj)
+
+        self._root.textures.append(texture)
+
+        return len(self._root.textures) - 1
+
+    def ExportImage(self, texture: Texture2D, textureMapType: TextureMapType) -> int:
+        id = self.GetImageId(texture)
+        if id != None:
+            return id
+
+        image = GLTFImage(name=texture.name)
+
+        self._imageInfos.append(self.ImageInfo(texture, textureMapType))
+
+        filenamePath = str(self.ConstructImageFilenamePath(texture, ""))
+        image.uri = urllib.parse.quote(filenamePath)
+
+        self._root.images.append(image)
+        return len(self._root.images) - 1
 
     def ExportImageInternalBuffer(
         self, texture: Texture, texturMapType: TextureMapType
@@ -536,6 +824,8 @@ class UnityGLTFExporter:
                 )
                 sampler.minFilter = self.MinFilterMode.LinearMipmapLinear
                 sampler.magFilter = self.MagFilterMode.Linear
+        self._root.samplers.append(sampler)
+        return len(self._root.samplers) - 1
 
     def ExportAccessor_int(self, values: List[int], isIndices: bool = False) -> int:
         count = len(values)
@@ -891,9 +1181,9 @@ class UnityGLTFExporter:
         pos = UnityGLTFExporter.UnityToGltfVector3Convert(transform.m_LocalPosition)
         scale = transform.m_LocalScale
         rot = UnityGLTFExporter.UnityToGltfQuaternionConvert(transform.m_LocalRotation)
-        if pos != Vector3.Zero():
+        if not (pos.X == 0 and pos.Y == 0 and pos.Z == 0):
             node.translation = list((pos.X, pos.Y, pos.Z))
-        if scale != Vector3.One():
+        if not (scale.X == 1 and scale.Y == 1 and scale.Z == 1):
             node.scale = list((scale.X, scale.Y, scale.Z))
         if rot.X != 0 and rot.Y != 0 and rot.Z != 0 and rot.W != 1:
             node.rotation = list((rot.X, rot.Y, rot.Z, rot.W))
