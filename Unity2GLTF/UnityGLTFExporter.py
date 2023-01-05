@@ -515,9 +515,9 @@ class UnityGLTFExporter:
                 emissionTex = (
                     materialObj.m_SavedProperties.m_TexEnvs["_EmissionMap"]
                     .m_Texture.get_obj()
-                    .read()
                 )
                 if emissionTex != None:
+                    emissionTex = emissionTex.read()
                     if isinstance(emissionTex, Texture2D):
                         material.emissiveTexture = self.ExportTextureInfo(
                             emissionTex, TextureMapType.Emission
@@ -537,10 +537,10 @@ class UnityGLTFExporter:
                 normalTex = (
                     materialObj.m_SavedProperties.m_TexEnvs["_BumpMap"]
                     .m_Texture.get_obj()
-                    .read()
                 )
 
                 if normalTex != None:
+                    normalTex = normalTex.read()
                     if isinstance(normalTex, Texture2D):
                         material.normalTexture = self.ExportNormalTextureInfo(
                             normalTex, TextureMapType.Bump, materialObj
@@ -558,9 +558,9 @@ class UnityGLTFExporter:
                 occTex = (
                     materialObj.m_SavedProperties.m_TexEnvs["_OcclusionMap"]
                     .m_Texture.get_obj()
-                    .read()
                 )
                 if occTex != None:
+                    occTex = occTex.read()
                     if isinstance(occTex, Texture2D):
                         material.occlusionTexture = self.ExportOcclusionTextureInfo(
                             occTex, TextureMapType.Occlusion, materialObj
@@ -647,12 +647,11 @@ class UnityGLTFExporter:
             pbr.baseColorFactor = list((color.R, color.G, color.B, color.A))
 
         if "_MainTex" in materialObj.m_SavedProperties.m_TexEnvs:
-            mainTex = (
-                materialObj.m_SavedProperties.m_TexEnvs["_MainTex"]
-                .m_Texture.get_obj()
-                .read()
-            )
+            mainTex = materialObj.m_SavedProperties.m_TexEnvs[
+                "_MainTex"
+            ].m_Texture.get_obj()
             if mainTex != None:
+                mainTex = mainTex.read()
                 if isinstance(mainTex, Texture2D):
                     pbr.baseColorTexture = self.ExportTextureInfo(
                         mainTex, TextureMapType.Main
@@ -669,9 +668,9 @@ class UnityGLTFExporter:
         if "_Metallic" in materialObj.m_SavedProperties.m_Floats:
             metallicGlossMap = (
                 (
-                    materialObj.m_SavedProperties.m_TexEnvs["_MetallicGlossMap"]
-                    .m_Texture.get_obj()
-                    .read()
+                    materialObj.m_SavedProperties.m_TexEnvs[
+                        "_MetallicGlossMap"
+                    ].m_Texture.get_obj()
                 )
                 if "_MetallicGlossMap" in materialObj.m_SavedProperties.m_TexEnvs
                 else None
@@ -685,9 +684,9 @@ class UnityGLTFExporter:
         if "_Glossiness" in materialObj.m_SavedProperties.m_Floats:
             metallicGlossMap = (
                 (
-                    materialObj.m_SavedProperties.m_TexEnvs["_MetallicGlossMap"]
-                    .m_Texture.get_obj()
-                    .read()
+                    materialObj.m_SavedProperties.m_TexEnvs[
+                        "_MetallicGlossMap"
+                    ].m_Texture.get_obj()
                 )
                 if "_MetallicGlossMap" in materialObj.m_SavedProperties.m_TexEnvs
                 else None
@@ -695,16 +694,16 @@ class UnityGLTFExporter:
             pbr.roughnessFactor = (
                 1.0
                 if (metallicGlossMap != None)
-                else 1.0 - material.m_SavedProperties.m_Floats["_Glossiness"]
+                else 1.0 - materialObj.m_SavedProperties.m_Floats["_Glossiness"]
             )
 
         if "_MetallicGlossMap" in materialObj.m_SavedProperties.m_TexEnvs:
             mrTex: Texture | None = (
                 materialObj.m_SavedProperties.m_TexEnvs["_MetallicGlossMap"]
                 .m_Texture.get_obj()
-                .read()
             )
             if mrTex != None:
+                mrTex = mrTex.read()
                 if isinstance(mrTex, Texture2D):
                     pbr.metallicRoughnessTexture = self.ExportTextureInfo(
                         mrTex, TextureMapType.MetallicGloss
@@ -720,9 +719,9 @@ class UnityGLTFExporter:
             mgTex = (
                 materialObj.m_SavedProperties.m_TexEnvs["_SpecGlossMap"]
                 .m_Texture.get_obj()
-                .read()
             )
             if mgTex != None:
+                mgTex = mgTex.read()
                 if isinstance(mgTex, Texture2D):
                     pbr.metallicRoughnessTexture = self.ExportTextureInfo(
                         mgTex, TextureMapType.SpecGloss
